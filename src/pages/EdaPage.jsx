@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useData } from '../context/DataContext';
 import { useAuth } from '../context/AuthContext';
-import { ArrowLeft, Sparkles, Download, ArrowRight, AlertTriangle, CheckCircle2, Trash2, FileSpreadsheet, Eye, Loader2 } from 'lucide-react';
+import { ArrowLeft, Sparkles, Download, ArrowRight, AlertTriangle, CheckCircle2, Trash2, FileSpreadsheet, Eye, Loader2, Zap } from 'lucide-react';
 
 export default function EdaPage() {
   const navigate = useNavigate();
@@ -318,15 +318,33 @@ export default function EdaPage() {
             </div>
 
             {/* Actions */}
-            <div className="fade-in-up" style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+            <div className="fade-in-up" style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
               <button className="btn-secondary" onClick={() => downloadCSV(cleanData, `${tableName}_clean.csv`)} id="download-clean-btn">
                 <Download size={16} /> Download Clean Data
               </button>
               <button className="btn-secondary" onClick={() => downloadCSV(trashData, `${tableName}_trash.csv`)} id="download-trash-btn">
                 <Download size={16} /> Download Trash Data
               </button>
-              <button className="btn-primary" onClick={() => navigate('/customize')} style={{ marginLeft: 'auto' }} id="proceed-dashboard-btn">
-                Proceed to Dashboard <ArrowRight size={18} />
+              <div style={{ flex: 1 }} />
+              {/* AUTO-VISUALIZE — primary Phase 5 CTA */}
+              <button
+                id="auto-visualize-btn"
+                onClick={() => navigate('/auto-dashboard')}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '11px 22px', borderRadius: 12, border: 'none',
+                  cursor: 'pointer', fontWeight: 700, fontSize: '0.9rem',
+                  background: 'linear-gradient(135deg, #7c3aed, #3b82f6)',
+                  color: '#fff', boxShadow: '0 4px 18px rgba(124,58,237,0.35)',
+                  transition: 'transform 0.15s, box-shadow 0.15s',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 24px rgba(124,58,237,0.45)'; }}
+                onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = '0 4px 18px rgba(124,58,237,0.35)'; }}
+              >
+                <Zap size={16} /> Auto-Visualize Dashboard
+              </button>
+              <button className="btn-secondary" onClick={() => navigate('/customize')} id="proceed-dashboard-btn">
+                Custom Builder <ArrowRight size={16} />
               </button>
             </div>
           </>

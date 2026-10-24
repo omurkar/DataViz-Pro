@@ -1007,6 +1007,480 @@ def upload_excel():
 
 
 # ============================================================
+# Phase 1-3: Zero-Click Auto-Visualization Engine
+# ============================================================
+
+TEMPORAL_KEYWORDS = [
+    'date', 'time', 'year', 'month', 'day', 'week', 'quarter',
+    'timestamp', 'period', 'created', 'updated', 'at', 'on',
+]
+ID_KEYWORDS = ['id', 'key', 'uuid', 'guid', 'code', 'ref', 'no', 'num', 'number']
+
+
+def _classify_column(col_name, series, n_rows):
+    """
+    Classify a column into: 'temporal', 'categorical', 'continuous', 'unique_id', 'boolean'
+    Returns dict with type, stats, sample_values.
+    """
+    col_lower = col_name.lower().strip()
+    unique_count = series.nunique()
+    unique_ratio = unique_count / max(n_rows, 1)
+
+    # --- Try datetime parsing first ---
+    if any(kw in col_lower for kw in TEMPORAL_KEYWORDS):
+        try:
+            parsed = pd.to_datetime(series, infer_datetime_format=True, errors='coerce')
+            if parsed.notna().mean() > 0.7:
+                return {
+                    'type': 'temporal',
+                    'unique': int(unique_count),
+                    'sample': [str(v) for v in parsed.dropna().head(3).tolist()],
+                }
+        except Exception:
+            pass
+
+    # --- Check actual dtype ---
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return {
+            'type': 'temporal',
+            'unique': int(unique_count),
+            'sample': [str(v) for v in series.dropna().head(3).tolist()],
+        }
+
+    if pd.api.types.is_bool_dtype(series):
+        return {'type': 'boolean', 'unique': 2, 'sample': series.dropna().unique().tolist()[:3]}
+
+    if pd.api.types.is_numeric_dtype(series):
+        # Binary → boolean-like
+        if unique_count <= 2:
+            return {'type': 'boolean', 'unique': int(unique_count), 'sample': series.unique().tolist()[:2]}
+        # Unique IDs (very high cardinality integers)
+        if unique_ratio > 0.9 and any(kw in col_lower for kw in ID_KEYWORDS):
+            return {'type': 'unique_id', 'unique': int(unique_count), 'sample': []}
+        # Continuous
+        desc = series.describe()
+        variance = float(series.var()) if len(series) > 1 else 0
+        return {
+            'type': 'continuous',
+            'unique': int(unique_count),
+            'min': float(desc['min']) if not pd.isnull(desc.get('min', float('nan'))) else 0,
+            'max': float(desc['max']) if not pd.isnull(desc.get('max', float('nan'))) else 0,
+            'mean': round(float(desc['mean']), 2) if not pd.isnull(desc.get('mean', float('nan'))) else 0,
+            'median': round(float(series.median()), 2),
+            'std': round(float(desc['std']), 2) if not pd.isnull(desc.get('std', float('nan'))) else 0,
+            'variance': round(variance, 4),
+            'sample': [],
+        }
+
+    # --- String columns ---
+    if any(kw in col_lower for kw in ID_KEYWORDS) and unique_ratio > 0.9:
+        return {'type': 'unique_id', 'unique': int(unique_count), 'sample': []}
+
+    if unique_count <= 30:
+        return {
+            'type': 'categorical',
+            'unique': int(unique_count),
+            'categories': series.dropna().unique().tolist()[:20],
+            'sample': series.dropna().head(3).tolist(),
+        }
+
+    # High-cardinality string → treat as unique_id or skip
+    return {'type': 'unique_id', 'unique': int(unique_count), 'sample': []}
+
+
+def _auto_clean(df):
+    """
+    Phase 1 auto cleaning:
+    - Drop columns with >80% null values
+    - Impute columns with <5% nulls (mean/median for numeric, mode for categorical)
+    Returns cleaned df and a list of step descriptions.
+    """
+    steps = []
+    n = len(df)
+
+    # Drop high-null columns
+    null_ratios = df.isnull().mean()
+    drop_cols = null_ratios[null_ratios > 0.8].index.tolist()
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+        steps.append(f"Dropped {len(drop_cols)} columns with >80% nulls: {', '.join(drop_cols)}")
+
+    # Impute low-null columns
+    for col in df.columns:
+        ratio = df[col].isnull().mean()
+        if 0 < ratio <= 0.05:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                fill_val = df[col].median()
+                df[col] = df[col].fillna(fill_val)
+                steps.append(f"Imputed '{col}' ({ratio*100:.1f}% nulls) with median {fill_val:.2f}")
+            else:
+                fill_val = df[col].mode().iloc[0] if len(df[col].mode()) > 0 else 'Unknown'
+                df[col] = df[col].fillna(fill_val)
+                steps.append(f"Imputed '{col}' ({ratio*100:.1f}% nulls) with mode '{fill_val}'")
+
+    return df, steps
+
+
+def _build_chart_data(df, x_col, y_col=None, agg='sum', limit=20):
+    """Build compact chart data arrays from a DataFrame."""
+    if y_col is None:
+        # Distribution: single numeric column histogram
+        series = df[x_col].dropna()
+        bins = pd.cut(series, bins=min(10, series.nunique()), precision=1)
+        counts = bins.value_counts().sort_index()
+        return [{'name': str(k), 'value': int(v)} for k, v in counts.items()]
+
+    # Group-by aggregation
+    try:
+        if agg == 'sum':
+            grouped = df.groupby(x_col)[y_col].sum()
+        elif agg == 'mean':
+            grouped = df.groupby(x_col)[y_col].mean()
+        elif agg == 'count':
+            grouped = df.groupby(x_col)[y_col].count()
+        else:
+            grouped = df.groupby(x_col)[y_col].sum()
+    except Exception:
+        return []
+
+    grouped = grouped.sort_values(ascending=False).head(limit)
+    return [{'name': str(k), 'value': round(float(v), 2)} for k, v in grouped.items()]
+
+
+def _build_scatter_data(df, x_col, y_col, limit=200):
+    sub = df[[x_col, y_col]].dropna().head(limit)
+    return [{'x': round(float(r[x_col]), 4), 'y': round(float(r[y_col]), 4)} for _, r in sub.iterrows()]
+
+
+def _build_timeseries_data(df, date_col, value_col, limit=60):
+    tmp = df[[date_col, value_col]].copy()
+    tmp[date_col] = pd.to_datetime(tmp[date_col], errors='coerce')
+    tmp = tmp.dropna(subset=[date_col])
+    tmp = tmp.sort_values(date_col)
+    tmp = tmp.groupby(date_col)[value_col].sum().reset_index()
+    tmp = tmp.tail(limit)
+    return [{'name': str(r[date_col])[:10], 'value': round(float(r[value_col]), 2)} for _, r in tmp.iterrows()]
+
+
+def _heuristic_charts(df, schema, n_rows):
+    """
+    Phase 2 heuristic engine — returns list of chart config dicts.
+    Rules:
+      Time-Series: 1 temporal + 1 continuous → line
+      Ranking:     1 categorical (<15 unique) + 1 continuous → bar
+      Correlation: 2 continuous → scatter
+      Distribution: 1 continuous → histogram
+      Top KPIs:    SUM / AVG of highest-variance continuous cols
+    """
+    charts = []
+    kpi_cards = []
+
+    temporals = [c for c, m in schema.items() if m['type'] == 'temporal']
+    categoricals = [c for c, m in schema.items() if m['type'] == 'categorical' and m.get('unique', 999) <= 15]
+    continuous = sorted(
+        [c for c, m in schema.items() if m['type'] == 'continuous'],
+        key=lambda c: schema[c].get('variance', 0), reverse=True
+    )
+
+    chart_id = 0
+
+    # --- KPI Cards: top-3 highest-variance numeric columns ---
+    for col in continuous[:3]:
+        total = df[col].sum()
+        avg = df[col].mean()
+        fmt_total = f"{total:,.0f}" if abs(total) < 1e9 else f"{total/1e6:,.1f}M"
+        kpi_cards.append({
+            'id': f'kpi_{col}',
+            'title': col.replace('_', ' ').title(),
+            'value': fmt_total,
+            'trend': f"avg {avg:,.1f}",
+            'column': col,
+        })
+
+    # --- Time-Series Rules ---
+    for t_col in temporals[:2]:
+        for v_col in continuous[:3]:
+            chart_id += 1
+            data = _build_timeseries_data(df, t_col, v_col)
+            if len(data) < 2:
+                continue
+            charts.append({
+                'id': f'chart_{chart_id}',
+                'type': 'line',
+                'title': f'{v_col.replace("_"," ").title()} Over Time',
+                'xAxis': t_col,
+                'yAxis': v_col,
+                'data': data,
+            })
+
+    # --- Ranking (Bar) Rules ---
+    for cat_col in categoricals[:3]:
+        for v_col in continuous[:2]:
+            chart_id += 1
+            data = _build_chart_data(df, cat_col, v_col, agg='sum')
+            if not data:
+                continue
+            charts.append({
+                'id': f'chart_{chart_id}',
+                'type': 'bar',
+                'title': f'{v_col.replace("_"," ").title()} by {cat_col.replace("_"," ").title()}',
+                'xAxis': cat_col,
+                'yAxis': v_col,
+                'data': data,
+            })
+
+    # --- Correlation (Scatter) ---
+    if len(continuous) >= 2:
+        chart_id += 1
+        data = _build_scatter_data(df, continuous[0], continuous[1])
+        if data:
+            charts.append({
+                'id': f'chart_{chart_id}',
+                'type': 'scatter',
+                'title': f'{continuous[0].replace("_"," ").title()} vs {continuous[1].replace("_"," ").title()}',
+                'xAxis': continuous[0],
+                'yAxis': continuous[1],
+                'data': data,
+            })
+
+    # --- Distribution (Histogram) ---
+    for v_col in continuous[:2]:
+        chart_id += 1
+        data = _build_chart_data(df, v_col)
+        if data:
+            charts.append({
+                'id': f'chart_{chart_id}',
+                'type': 'bar',
+                'title': f'Distribution of {v_col.replace("_"," ").title()}',
+                'xAxis': 'Range',
+                'yAxis': 'Count',
+                'isDistribution': True,
+                'data': data,
+            })
+
+    # --- Pie chart for first categorical ---
+    if categoricals:
+        cat_col = categoricals[0]
+        chart_id += 1
+        if continuous:
+            data = _build_chart_data(df, cat_col, continuous[0], agg='sum')
+        else:
+            counts = df[cat_col].value_counts().head(10)
+            data = [{'name': str(k), 'value': int(v)} for k, v in counts.items()]
+        if data:
+            charts.append({
+                'id': f'chart_{chart_id}',
+                'type': 'pie',
+                'title': f'{cat_col.replace("_"," ").title()} Breakdown',
+                'xAxis': cat_col,
+                'yAxis': continuous[0] if continuous else 'count',
+                'data': data,
+            })
+
+    return kpi_cards, charts[:8]  # cap at 8 charts
+
+
+def _llm_charts(df, schema, n_rows):
+    """
+    Phase 2 LLM path: ask Gemini to select the 5 best charts.
+    Returns (kpi_cards, charts) tuples on success, or falls back to heuristic.
+    """
+    if not model:
+        return _heuristic_charts(df, schema, n_rows)
+
+    sample_rows = df.head(5).to_dict(orient='records')
+    # Serialize for JSON
+    for row in sample_rows:
+        for k, v in row.items():
+            if pd.isnull(v) if not isinstance(v, (list, dict)) else False:
+                row[k] = None
+            elif isinstance(v, (np.integer,)):
+                row[k] = int(v)
+            elif isinstance(v, (np.floating,)):
+                row[k] = round(float(v), 4)
+            elif isinstance(v, pd.Timestamp):
+                row[k] = str(v)
+
+    schema_for_prompt = {
+        col: {'type': meta['type'], 'unique': meta.get('unique'), 'sample': meta.get('sample', [])}
+        for col, meta in schema.items()
+    }
+
+    prompt = f"""You are a Senior Data Analyst. Given this dataset schema and sample rows, 
+select the 5 most analytically insightful charts to build.
+
+SCHEMA (column → semantic type):
+{json.dumps(schema_for_prompt, indent=2)}
+
+SAMPLE ROWS (first 5):
+{json.dumps(sample_rows, indent=2)}
+
+RULES:
+- temporal + continuous → "line" chart
+- categorical (<=15 unique) + continuous → "bar" chart
+- 2 continuous → "scatter" chart
+- 1 continuous alone → "bar" histogram
+- categorical breakdown → "pie" chart
+
+Return ONLY a valid JSON array of exactly 5 objects, no markdown, no prose:
+[
+  {{
+    "type": "line|bar|scatter|pie",
+    "title": "Human readable chart title",
+    "xAxis": "column_name",
+    "yAxis": "column_name_or_null"
+  }}
+]"""
+
+    try:
+        response_text = ask_gemini(prompt)
+        if not response_text:
+            return _heuristic_charts(df, schema, n_rows)
+
+        # Strip markdown fences if present
+        cleaned = response_text.strip()
+        if '```' in cleaned:
+            parts = cleaned.split('```')
+            for p in parts:
+                if '[' in p:
+                    cleaned = p.strip()
+                    if cleaned.startswith('json'):
+                        cleaned = cleaned[4:].strip()
+                    break
+
+        chart_specs = json.loads(cleaned)
+
+        # Build KPI cards from highest-variance continuous cols
+        continuous = sorted(
+            [c for c, m in schema.items() if m['type'] == 'continuous'],
+            key=lambda c: schema[c].get('variance', 0), reverse=True
+        )
+        kpi_cards = []
+        for col in continuous[:3]:
+            total = df[col].sum()
+            avg = df[col].mean()
+            fmt_total = f"{total:,.0f}" if abs(total) < 1e9 else f"{total/1e6:,.1f}M"
+            kpi_cards.append({
+                'id': f'kpi_{col}',
+                'title': col.replace('_', ' ').title(),
+                'value': fmt_total,
+                'trend': f"avg {avg:,.1f}",
+                'column': col,
+            })
+
+        # Hydrate charts with actual data
+        charts = []
+        for i, spec in enumerate(chart_specs[:5]):
+            chart_type = spec.get('type', 'bar')
+            x_col = spec.get('xAxis')
+            y_col = spec.get('yAxis')
+            title = spec.get('title', f'Chart {i+1}')
+
+            if not x_col or x_col not in df.columns:
+                continue
+
+            if chart_type == 'scatter' and y_col and y_col in df.columns:
+                data = _build_scatter_data(df, x_col, y_col)
+            elif chart_type == 'line' and y_col and y_col in df.columns:
+                data = _build_timeseries_data(df, x_col, y_col)
+            elif y_col and y_col in df.columns:
+                data = _build_chart_data(df, x_col, y_col)
+            else:
+                data = _build_chart_data(df, x_col)
+
+            if data:
+                charts.append({
+                    'id': f'chart_{i+1}',
+                    'type': chart_type,
+                    'title': title,
+                    'xAxis': x_col,
+                    'yAxis': y_col,
+                    'data': data,
+                })
+
+        if charts:
+            return kpi_cards, charts
+
+    except Exception as e:
+        print(f"[LLM chart engine error]: {e}")
+
+    # Fallback to heuristic
+    return _heuristic_charts(df, schema, n_rows)
+
+
+@app.route('/api/auto-dashboard', methods=['POST'])
+def auto_dashboard():
+    """
+    Zero-Click Auto-Visualization endpoint.
+    Accepts JSON body: { data: [...], columns: [...], use_llm: bool }
+    Returns a standardized Dashboard Configuration Object.
+    """
+    try:
+        body = request.json
+        records = body.get('data', [])
+        columns = body.get('columns', [])
+        use_llm = body.get('use_llm', True)  # Default: try LLM first
+
+        if not records:
+            return jsonify({'success': False, 'error': 'No data provided'})
+
+        # Reconstruct DataFrame
+        df = pd.DataFrame(records)
+        if columns:
+            existing = [c for c in columns if c in df.columns]
+            df = df[existing]
+
+        n_rows = len(df)
+        cleaning_steps = []
+
+        # ── Phase 1: Automated pre-cleaning ──────────────────────
+        df, steps = _auto_clean(df)
+        cleaning_steps.extend(steps)
+
+        # Re-parse date columns that came in as strings
+        for col in df.columns:
+            if df[col].dtype == object:
+                if any(kw in col.lower() for kw in TEMPORAL_KEYWORDS):
+                    try:
+                        parsed = pd.to_datetime(df[col], infer_datetime_format=True, errors='coerce')
+                        if parsed.notna().mean() > 0.7:
+                            df[col] = parsed
+                    except Exception:
+                        pass
+
+        # ── Phase 1: Semantic Column Classification ───────────────
+        schema = {}
+        for col in df.columns:
+            schema[col] = _classify_column(col, df[col], n_rows)
+
+        # ── Phase 2: Chart Recommendation ────────────────────────
+        if use_llm and model:
+            kpi_cards, charts = _llm_charts(df, schema, n_rows)
+        else:
+            kpi_cards, charts = _heuristic_charts(df, schema, n_rows)
+
+        # ── Phase 3: Dashboard Config Payload ────────────────────
+        return jsonify({
+            'success': True,
+            'dashboard': {
+                'kpi_cards': kpi_cards,
+                'charts': charts,
+                'schema': schema,
+                'meta': {
+                    'rows': n_rows,
+                    'columns': list(df.columns),
+                    'cleaning_steps': cleaning_steps,
+                    'engine': 'llm' if (use_llm and model) else 'heuristic',
+                }
+            }
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Auto-dashboard failed: {str(e)}'})
+
+
+# ============================================================
 # Health Check
 # ============================================================
 @app.route('/api/health', methods=['GET'])

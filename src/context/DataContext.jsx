@@ -34,6 +34,18 @@ export function DataProvider({ children }) {
   // Chart configurations (accumulated from customization page)
   const [chartConfigs, setChartConfigs] = useState([]);
 
+  // ── AUTO DASHBOARD ───────────────────────────────────────────
+  // Stores the Phase 3 dashboard config object returned by /api/auto-dashboard
+  const [autoDashboard, setAutoDashboard] = useState(null);
+  // 'idle' | 'loading' | 'done' | 'error'
+  const [autoDashboardStatus, setAutoDashboardStatus] = useState('idle');
+  const [autoDashboardError, setAutoDashboardError] = useState(null);
+  // Grid layout for edit mode (react-grid-layout format)
+  const [dashboardLayout, setDashboardLayout] = useState([]);
+  // Whether the user has activated Edit Mode on the auto-dashboard
+  const [editModeActive, setEditModeActive] = useState(false);
+  // ─────────────────────────────────────────────────────────────
+
   // Dashboard settings
   const [dashboardSettings, setDashboardSettings] = useState({
     colorTheme: 'purple', // purple, ocean, sunset
@@ -66,6 +78,11 @@ export function DataProvider({ children }) {
     setChartConfigs([]);
     setDashboardSettings({ colorTheme: 'purple', gridCols: 2 });
     setCurrentSessionId(null);
+    setAutoDashboard(null);
+    setAutoDashboardStatus('idle');
+    setAutoDashboardError(null);
+    setDashboardLayout([]);
+    setEditModeActive(false);
   };
 
   const value = {
@@ -82,6 +99,11 @@ export function DataProvider({ children }) {
     chartConfigs, setChartConfigs, addChartConfig, resetChartConfigs,
     dashboardSettings, setDashboardSettings,
     currentSessionId, setCurrentSessionId,
+    autoDashboard, setAutoDashboard,
+    autoDashboardStatus, setAutoDashboardStatus,
+    autoDashboardError, setAutoDashboardError,
+    dashboardLayout, setDashboardLayout,
+    editModeActive, setEditModeActive,
     resetAll,
   };
 

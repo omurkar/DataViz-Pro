@@ -246,12 +246,20 @@ export default function MainDashboard() {
       delay: 500,
     },
     {
+      icon: <Sparkles size={24} />,
+      label: 'Auto-Visualize',
+      desc: 'One-click: clean, profile, and generate a full dashboard instantly',
+      onClick: () => navigate('/auto-dashboard'),
+      gradient: 'linear-gradient(135deg, #7c3aed, #06b6d4)',
+      delay: 560,
+    },
+    {
       icon: <History size={24} />,
       label: 'Analysis History',
       desc: 'Browse previous sessions and re-export dashboards',
       onClick: () => navigate('/history'),
       gradient: 'linear-gradient(135deg, #059669, #10b981)',
-      delay: 580,
+      delay: 640,
     },
   ];
 

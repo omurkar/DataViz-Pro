@@ -11,6 +11,7 @@ import EdaPage from './pages/EdaPage';
 import CustomizePage from './pages/CustomizePage';
 import DashboardView from './pages/DashboardView';
 import HistoryPage from './pages/HistoryPage';
+import AutoDashboardPage from './pages/AutoDashboardPage';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -33,6 +34,7 @@ function AppRoutes() {
       <Route path="/dashboard" element={<ProtectedRoute><MainDashboard /></ProtectedRoute>} />
       <Route path="/connect" element={<ProtectedRoute><ConnectionPage /></ProtectedRoute>} />
       <Route path="/eda" element={<ProtectedRoute><EdaPage /></ProtectedRoute>} />
+      <Route path="/auto-dashboard" element={<ProtectedRoute><AutoDashboardPage /></ProtectedRoute>} />
       <Route path="/customize" element={<ProtectedRoute><CustomizePage /></ProtectedRoute>} />
       <Route path="/dashboard-view" element={<ProtectedRoute><DashboardView /></ProtectedRoute>} />
       <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
