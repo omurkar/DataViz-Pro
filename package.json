@@ -14,16 +14,19 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.2.4",
     "@vitejs/plugin-react": "^6.0.1",
+    "crossfilter2": "^1.5.4",
     "firebase": "^12.12.1",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.14.0",
     "papaparse": "^5.5.3",
+    "pptxgenjs": "^4.0.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-grid-layout": "^2.3.0",
     "react-is": "^19.3.1",
     "react-router-dom": "^7.14.2",
+    "react-syntax-highlighter": "^16.1.2",
     "recharts": "^3.8.1",
     "tailwindcss": "^4.2.4"
   }

@@ -1480,6 +1480,622 @@ def auto_dashboard():
         return jsonify({'success': False, 'error': f'Auto-dashboard failed: {str(e)}'})
 
 
+
+# ============================================================
+# Feature 1: Natural Language Query → Chart (Chat-to-Chart)
+# ============================================================
+@app.route('/api/nl-query', methods=['POST'])
+def nl_query():
+    """
+    Accepts: { question: str, data: [...], columns: [...] }
+    Returns: { chart_config: {...}, sql_hint: str, insight: str }
+    """
+    try:
+        body = request.json
+        question = body.get('question', '').strip()
+        records  = body.get('data', [])
+        columns  = body.get('columns', [])
+
+        if not question:
+            return jsonify({'success': False, 'error': 'No question provided'})
+        if not records:
+            return jsonify({'success': False, 'error': 'No data provided'})
+
+        df = pd.DataFrame(records)
+        if columns:
+            df = df[[c for c in columns if c in df.columns]]
+
+        # Build schema description for the LLM
+        schema_lines = []
+        for col in df.columns:
+            dtype = str(df[col].dtype)
+            nuniq = df[col].nunique()
+            sample = df[col].dropna().head(3).tolist()
+            schema_lines.append(f"  - {col} (dtype={dtype}, unique={nuniq}, sample={sample})")
+        schema_str = "\n".join(schema_lines)
+
+        prompt = f"""You are a data visualization expert. The user has a dataset with these columns:
+{schema_str}
+
+User question: "{question}"
+
+Respond ONLY with valid JSON (no markdown) in this format:
+{{
+  "chart_type": "bar" | "line" | "pie" | "scatter" | "area",
+  "x_column": "<column name>",
+  "y_column": "<column name or null>",
+  "aggregation": "sum" | "mean" | "count" | "none",
+  "title": "<short chart title>",
+  "insight": "<one sentence analytical insight about this chart>",
+  "sql_hint": "<a SQL SELECT query that would produce this chart data>"
+}}
+
+Pick the BEST chart type for the question. Only use columns that exist in the schema above."""
+
+        chart_config = None
+        insight_text = ""
+        sql_hint = ""
+
+        if model:
+            response_text = ask_gemini(prompt)
+            if response_text:
+                try:
+                    # Strip markdown code fences if present
+                    clean = response_text.strip()
+                    if clean.startswith('```'):
+                        clean = clean.split('```')[1]
+                        if clean.startswith('json'):
+                            clean = clean[4:]
+                    parsed = json.loads(clean.strip())
+                    x_col = parsed.get('x_column')
+                    y_col = parsed.get('y_column')
+                    agg   = parsed.get('aggregation', 'sum')
+                    ctype = parsed.get('chart_type', 'bar')
+                    title = parsed.get('title', question)
+                    insight_text = parsed.get('insight', '')
+                    sql_hint = parsed.get('sql_hint', '')
+
+                    # Build data
+                    if x_col and x_col in df.columns:
+                        if y_col and y_col in df.columns:
+                            data = _build_chart_data(df, x_col, y_col, agg)
+                        else:
+                            data = _build_chart_data(df, x_col)
+                        chart_config = {
+                            'id': 'nl_chart',
+                            'type': ctype,
+                            'title': title,
+                            'x': x_col,
+                            'y': y_col,
+                            'data': data,
+                            'sql_hint': sql_hint,
+                        }
+                except Exception as parse_err:
+                    print(f"[NL-Query JSON parse error]: {parse_err}")
+
+        # Fallback: simple heuristic
+        if not chart_config:
+            q_lower = question.lower()
+            num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+            cat_cols = [c for c in df.columns if df[c].dtype == object and df[c].nunique() <= 20]
+            x_col = cat_cols[0] if cat_cols else (num_cols[0] if num_cols else df.columns[0])
+            y_col = num_cols[0] if num_cols else None
+            ctype = 'bar'
+            if any(kw in q_lower for kw in ['trend', 'over time', 'timeline']):
+                ctype = 'line'
+            elif 'distribution' in q_lower or 'breakdown' in q_lower:
+                ctype = 'pie'
+            data = _build_chart_data(df, x_col, y_col) if y_col else _build_chart_data(df, x_col)
+            chart_config = {
+                'id': 'nl_chart',
+                'type': ctype,
+                'title': question,
+                'x': x_col,
+                'y': y_col,
+                'data': data,
+                'sql_hint': f"SELECT {x_col}, SUM({y_col}) FROM table GROUP BY {x_col}" if y_col else f"SELECT {x_col}, COUNT(*) FROM table GROUP BY {x_col}",
+            }
+            insight_text = f"Showing {ctype} chart of {y_col or x_col} by {x_col}."
+
+        return jsonify({
+            'success': True,
+            'chart_config': chart_config,
+            'insight': insight_text,
+            'sql_hint': sql_hint,
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
+
+
+# ============================================================
+# Feature 2: Anomaly Detection
+# ============================================================
+@app.route('/api/anomaly-detect', methods=['POST'])
+def anomaly_detect():
+    """
+    Accepts: { data: [...], column: str, method: 'zscore'|'iqr' }
+    Returns: { anomalies: [{index, value, reason}], stats: {...} }
+    """
+    try:
+        body   = request.json
+        records = body.get('data', [])
+        column  = body.get('column', '')
+        method  = body.get('method', 'zscore')
+
+        if not records or not column:
+            return jsonify({'success': False, 'error': 'data and column required'})
+
+        df = pd.DataFrame(records)
+        if column not in df.columns:
+            return jsonify({'success': False, 'error': f'Column "{column}" not found'})
+
+        series = pd.to_numeric(df[column], errors='coerce').dropna()
+
+        if len(series) < 4:
+            return jsonify({'success': False, 'error': 'Need at least 4 data points'})
+
+        anomaly_indices = set()
+
+        if method == 'zscore':
+            mean = series.mean()
+            std  = series.std()
+            z_scores = ((series - mean) / std).abs()
+            anomaly_indices = set(series[z_scores > 2.5].index.tolist())
+            stats = {'mean': round(float(mean), 4), 'std': round(float(std), 4), 'threshold': '±2.5σ'}
+        else:  # IQR
+            Q1 = series.quantile(0.25)
+            Q3 = series.quantile(0.75)
+            IQR = Q3 - Q1
+            lower = Q1 - 1.5 * IQR
+            upper = Q3 + 1.5 * IQR
+            anomaly_indices = set(series[(series < lower) | (series > upper)].index.tolist())
+            stats = {'Q1': round(float(Q1), 4), 'Q3': round(float(Q3), 4),
+                     'lower_bound': round(float(lower), 4), 'upper_bound': round(float(upper), 4)}
+
+        # Build annotated data array
+        enriched_data = []
+        for i, row in df.iterrows():
+            val = row.get(column)
+            enriched_data.append({
+                'index': i,
+                'value': val,
+                'is_anomaly': i in anomaly_indices,
+            })
+
+        anomalies = [
+            {'index': d['index'], 'value': d['value'], 'reason': f'Statistical outlier ({method})'}
+            for d in enriched_data if d['is_anomaly']
+        ]
+
+        return jsonify({
+            'success': True,
+            'column': column,
+            'method': method,
+            'anomaly_count': len(anomalies),
+            'anomalies': anomalies,
+            'stats': stats,
+            'enriched_data': enriched_data,
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
+
+
+# ============================================================
+# Feature 3: Calculated Field Builder
+# ============================================================
+@app.route('/api/calc-field', methods=['POST'])
+def calc_field():
+    """
+    Accepts: { data: [...], formula: str, new_column_name: str }
+    Evaluates formula against the dataframe using pandas.eval().
+    Returns: { data: [...], columns: [...] }
+    """
+    try:
+        body       = request.json
+        records    = body.get('data', [])
+        formula    = body.get('formula', '').strip()
+        new_col    = body.get('new_column_name', 'calc_field').strip()
+
+        if not records or not formula:
+            return jsonify({'success': False, 'error': 'data and formula required'})
+
+        # Security: block dangerous keywords
+        BLOCKED = ['import', 'exec', 'eval', 'open', 'os.', 'sys.', '__', 'subprocess', 'globals', 'locals']
+        formula_lower = formula.lower()
+        for blocked in BLOCKED:
+            if blocked in formula_lower:
+                return jsonify({'success': False, 'error': f'Formula contains blocked keyword: {blocked}'})
+
+        df = pd.DataFrame(records)
+
+        # Sanitize new_col name
+        safe_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in new_col)
+        if not safe_name:
+            safe_name = 'calc_field'
+
+        # Evaluate with pandas.eval (safe subset of Python expressions)
+        df[safe_name] = df.eval(formula)
+
+        # Convert back to JSON-safe records
+        result_records = json.loads(df.to_json(orient='records', date_format='iso'))
+
+        return jsonify({
+            'success': True,
+            'new_column': safe_name,
+            'formula': formula,
+            'data': result_records,
+            'columns': df.columns.tolist(),
+            'preview': result_records[:5],
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Formula error: {str(e)}'})
+
+
+# ============================================================
+# Feature 5: Transformation Lineage (re-apply pipeline)
+# ============================================================
+# In-memory store: session_id → { raw_data, pipeline_steps }
+_lineage_store = {}
+
+@app.route('/api/lineage/init', methods=['POST'])
+def lineage_init():
+    """Store raw data for lineage replay. Returns session_id."""
+    import uuid
+    body    = request.json
+    records = body.get('data', [])
+    columns = body.get('columns', [])
+    if not records:
+        return jsonify({'success': False, 'error': 'No data'})
+    sid = str(uuid.uuid4())[:8]
+    _lineage_store[sid] = {
+        'raw': records,
+        'raw_columns': columns,
+        'steps': []  # list of { id, description, type, params }
+    }
+    return jsonify({'success': True, 'session_id': sid})
+
+
+@app.route('/api/lineage/replay', methods=['POST'])
+def lineage_replay():
+    """
+    Re-apply a modified pipeline. Accepts { session_id, steps: [...] }
+    Returns { data, columns, steps_applied, cleaning_steps }
+    """
+    try:
+        body = request.json
+        sid  = body.get('session_id', '')
+        steps_in = body.get('steps', [])
+
+        if sid not in _lineage_store:
+            return jsonify({'success': False, 'error': 'Session not found. Re-upload data.'})
+
+        raw = _lineage_store[sid]['raw']
+        df  = pd.DataFrame(raw)
+        applied = []
+
+        for step in steps_in:
+            stype = step.get('type', '')
+            try:
+                if stype == 'drop_nulls':
+                    col = step.get('column')
+                    if col and col in df.columns:
+                        df = df.dropna(subset=[col])
+                        applied.append(f"Dropped rows with null in '{col}'")
+                elif stype == 'fill_mean':
+                    col = step.get('column')
+                    if col and col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                        df[col] = df[col].fillna(df[col].mean())
+                        applied.append(f"Filled nulls in '{col}' with mean")
+                elif stype == 'fill_mode':
+                    col = step.get('column')
+                    if col and col in df.columns:
+                        mode_val = df[col].mode().iloc[0] if len(df[col].mode()) > 0 else None
+                        if mode_val is not None:
+                            df[col] = df[col].fillna(mode_val)
+                            applied.append(f"Filled nulls in '{col}' with mode '{mode_val}'")
+                elif stype == 'drop_column':
+                    col = step.get('column')
+                    if col and col in df.columns:
+                        df = df.drop(columns=[col])
+                        applied.append(f"Dropped column '{col}'")
+                elif stype == 'rename_column':
+                    old = step.get('old_name')
+                    new = step.get('new_name')
+                    if old in df.columns and new:
+                        df = df.rename(columns={old: new})
+                        applied.append(f"Renamed '{old}' → '{new}'")
+                elif stype == 'calc_field':
+                    formula = step.get('formula', '')
+                    new_col = step.get('new_column', 'calc')
+                    BLOCKED = ['import', 'exec', 'eval', 'open', 'os.', 'sys.', '__']
+                    if not any(b in formula.lower() for b in BLOCKED):
+                        df[new_col] = df.eval(formula)
+                        applied.append(f"Added calculated field '{new_col}' = {formula}")
+            except Exception as step_err:
+                applied.append(f"[SKIPPED] {stype}: {step_err}")
+                continue
+
+        result = json.loads(df.to_json(orient='records', date_format='iso'))
+        return jsonify({
+            'success': True,
+            'data': result,
+            'columns': df.columns.tolist(),
+            'steps_applied': applied,
+            'row_count': len(df),
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
+
+
+# ============================================================
+# Feature 7: Automated Text Insights (NLG)
+# ============================================================
+@app.route('/api/nlg-insight', methods=['POST'])
+def nlg_insight():
+    """
+    Accepts: { chart_config: {...}, data: [...] }
+    Returns: { insight: str }
+    """
+    try:
+        body   = request.json
+        config = body.get('chart_config', {})
+        data   = body.get('data', config.get('data', []))
+
+        if not data:
+            return jsonify({'success': True, 'insight': 'No data to analyze.'})
+
+        values = [d.get('value', d.get('y', 0)) for d in data if d.get('value') is not None or d.get('y') is not None]
+        names  = [d.get('name', str(d.get('x', ''))) for d in data]
+
+        if not values:
+            return jsonify({'success': True, 'insight': 'Could not extract numeric values.'})
+
+        max_val   = max(values)
+        min_val   = min(values)
+        total     = sum(values)
+        avg       = total / len(values)
+        max_label = names[values.index(max_val)] if names else 'N/A'
+        min_label = names[values.index(min_val)] if names else 'N/A'
+
+        # Try LLM first
+        if model:
+            prompt = f"""You are a data analyst writing a one-sentence insight for a business chart.
+Chart title: "{config.get('title', 'Chart')}"
+Chart type: {config.get('type', 'bar')}
+Data summary: max={max_val:.2f} ({max_label}), min={min_val:.2f} ({min_label}), avg={avg:.2f}, total={total:.2f}, n={len(values)}
+Write ONE concise analytical sentence (no jargon, no "the chart shows"). Focus on the most interesting pattern, trend, or outlier."""
+            llm_resp = ask_gemini(prompt)
+            if llm_resp:
+                return jsonify({'success': True, 'insight': llm_resp.strip()})
+
+        # Rule-based fallback
+        title = config.get('title', 'This metric')
+        pct_max = (max_val / total * 100) if total > 0 else 0
+        if len(values) > 1:
+            change = ((values[-1] - values[0]) / abs(values[0]) * 100) if values[0] != 0 else 0
+            direction = "increased" if change > 0 else "decreased"
+            insight = (
+                f"{title}: {max_label} leads at {max_val:,.0f} ({pct_max:.1f}% of total), "
+                f"while the overall trend has {direction} by {abs(change):.1f}% from start to end."
+            )
+        else:
+            insight = f"{title} shows a peak of {max_val:,.0f} at {max_label} and a low of {min_val:,.0f} at {min_label}."
+
+        return jsonify({'success': True, 'insight': insight})
+
+    except Exception as e:
+        return jsonify({'success': True, 'insight': 'Analysis complete.'})
+
+
+# ============================================================
+# Feature 9: SQL & Python Code Export
+# ============================================================
+@app.route('/api/code-export', methods=['POST'])
+def code_export():
+    """
+    Accepts: { chart_config: {...}, table_name: str }
+    Returns: { sql: str, python: str }
+    """
+    try:
+        body    = request.json
+        config  = body.get('chart_config', {})
+        table   = body.get('table_name', 'your_table')
+        x_col   = config.get('x', config.get('x_column', 'category'))
+        y_col   = config.get('y', config.get('y_column', 'value'))
+        agg     = config.get('aggregation', 'SUM').upper()
+        ctype   = config.get('type', 'bar')
+        title   = config.get('title', 'Chart')
+
+        if agg == 'NONE':
+            agg = 'SUM'
+
+        # SQL
+        if y_col:
+            sql = (
+                f"-- {title}\n"
+                f"SELECT\n"
+                f"    {x_col},\n"
+                f"    {agg}({y_col}) AS {y_col}_{agg.lower()}\n"
+                f"FROM {table}\n"
+                f"GROUP BY {x_col}\n"
+                f"ORDER BY {y_col}_{agg.lower()} DESC\n"
+                f"LIMIT 20;"
+            )
+            python = (
+                f"# {title}\n"
+                f"import pandas as pd\n"
+                f"import matplotlib.pyplot as plt\n\n"
+                f"# Assuming df is your DataFrame\n"
+                f"chart_data = df.groupby('{x_col}')['{y_col}'].{agg.lower()}().reset_index()\n"
+                f"chart_data = chart_data.sort_values('{y_col}', ascending=False).head(20)\n\n"
+                f"plt.figure(figsize=(10, 6))\n"
+                f"plt.{ctype if ctype in ['bar', 'scatter'] else 'plot'}(chart_data['{x_col}'], chart_data['{y_col}'])\n"
+                f"plt.title('{title}')\n"
+                f"plt.xlabel('{x_col}')\n"
+                f"plt.ylabel('{y_col}')\n"
+                f"plt.tight_layout()\n"
+                f"plt.show()"
+            )
+        else:
+            sql = (
+                f"-- {title}\n"
+                f"SELECT\n"
+                f"    {x_col},\n"
+                f"    COUNT(*) AS count\n"
+                f"FROM {table}\n"
+                f"GROUP BY {x_col}\n"
+                f"ORDER BY count DESC\n"
+                f"LIMIT 20;"
+            )
+            python = (
+                f"# {title}\n"
+                f"import pandas as pd\n"
+                f"import matplotlib.pyplot as plt\n\n"
+                f"chart_data = df['{x_col}'].value_counts().head(20)\n\n"
+                f"plt.figure(figsize=(10, 6))\n"
+                f"chart_data.plot(kind='bar')\n"
+                f"plt.title('{title}')\n"
+                f"plt.tight_layout()\n"
+                f"plt.show()"
+            )
+
+        return jsonify({'success': True, 'sql': sql, 'python': python})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+# ============================================================
+# Feature 10: Threshold Alerts (store/list/delete)
+# ============================================================
+_alerts_store = {}  # user_id → list of alert dicts
+
+@app.route('/api/alerts', methods=['POST'])
+def create_alert():
+    """Create a threshold alert rule."""
+    try:
+        body     = request.json
+        user_id  = body.get('user_id', 'anonymous')
+        column   = body.get('column', '')
+        operator = body.get('operator', '<')  # '<', '>', '<=', '>='
+        threshold = float(body.get('threshold', 0))
+        label    = body.get('label', f'{column} {operator} {threshold}')
+
+        import uuid
+        alert = {
+            'id': str(uuid.uuid4())[:8],
+            'user_id': user_id,
+            'column': column,
+            'operator': operator,
+            'threshold': threshold,
+            'label': label,
+            'created_at': pd.Timestamp.now().isoformat(),
+            'status': 'active',
+        }
+        _alerts_store.setdefault(user_id, []).append(alert)
+        return jsonify({'success': True, 'alert': alert})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/alerts/<user_id>', methods=['GET'])
+def list_alerts(user_id):
+    return jsonify({'success': True, 'alerts': _alerts_store.get(user_id, [])})
+
+
+@app.route('/api/alerts/<user_id>/<alert_id>', methods=['DELETE'])
+def delete_alert(user_id, alert_id):
+    alerts = _alerts_store.get(user_id, [])
+    _alerts_store[user_id] = [a for a in alerts if a['id'] != alert_id]
+    return jsonify({'success': True})
+
+
+@app.route('/api/alerts/check', methods=['POST'])
+def check_alerts():
+    """Check current data against alert rules and return triggered ones."""
+    try:
+        body    = request.json
+        user_id = body.get('user_id', 'anonymous')
+        records = body.get('data', [])
+        if not records:
+            return jsonify({'success': True, 'triggered': []})
+
+        df = pd.DataFrame(records)
+        alerts = _alerts_store.get(user_id, [])
+        triggered = []
+
+        OPS = {'<': lambda a, b: a < b, '>': lambda a, b: a > b,
+               '<=': lambda a, b: a <= b, '>=': lambda a, b: a >= b, '==': lambda a, b: a == b}
+
+        for alert in alerts:
+            col = alert['column']
+            if col not in df.columns:
+                continue
+            series = pd.to_numeric(df[col], errors='coerce').dropna()
+            if series.empty:
+                continue
+            current_val = float(series.iloc[-1])
+            op_fn = OPS.get(alert['operator'], lambda a, b: False)
+            if op_fn(current_val, alert['threshold']):
+                triggered.append({
+                    **alert,
+                    'current_value': current_val,
+                    'message': f"Alert: {col} is {current_val:.2f} (rule: {col} {alert['operator']} {alert['threshold']})",
+                })
+
+        return jsonify({'success': True, 'triggered': triggered})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+# ============================================================
+# Feature 8: Collaborative Annotations (in-memory)
+# ============================================================
+_annotations_store = {}  # dashboard_id → list of annotation dicts
+
+@app.route('/api/annotations', methods=['POST'])
+def save_annotation():
+    """Save a chart annotation."""
+    try:
+        import uuid
+        body         = request.json
+        dashboard_id = body.get('dashboard_id', 'default')
+        annotation = {
+            'id':           str(uuid.uuid4())[:8],
+            'chart_id':     body.get('chart_id', ''),
+            'x_value':      body.get('x_value', ''),
+            'y_value':      body.get('y_value', None),
+            'user_id':      body.get('user_id', 'anonymous'),
+            'user_name':    body.get('user_name', 'User'),
+            'text':         body.get('text', ''),
+            'created_at':   pd.Timestamp.now().isoformat(),
+        }
+        _annotations_store.setdefault(dashboard_id, []).append(annotation)
+        return jsonify({'success': True, 'annotation': annotation})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/annotations/<dashboard_id>', methods=['GET'])
+def get_annotations(dashboard_id):
+    return jsonify({'success': True, 'annotations': _annotations_store.get(dashboard_id, [])})
+
+
+@app.route('/api/annotations/<dashboard_id>/<annotation_id>', methods=['DELETE'])
+def delete_annotation(dashboard_id, annotation_id):
+    anns = _annotations_store.get(dashboard_id, [])
+    _annotations_store[dashboard_id] = [a for a in anns if a['id'] != annotation_id]
+    return jsonify({'success': True})
+
+
 # ============================================================
 # Health Check
 # ============================================================

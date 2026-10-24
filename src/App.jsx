@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DataProvider } from './context/DataContext';
 import { ThemeProvider } from './context/ThemeContext';
+import { FilterProvider } from './context/FilterContext';
 
 import LoginPage from './pages/LoginPage';
 import MainDashboard from './pages/MainDashboard';
@@ -48,10 +49,12 @@ function App() {
     <ThemeProvider>
       <AuthProvider>
         <DataProvider>
-          <Router>
-            <div className="animated-bg"></div>
-            <AppRoutes />
-          </Router>
+          <FilterProvider>
+            <Router>
+              <div className="animated-bg"></div>
+              <AppRoutes />
+            </Router>
+          </FilterProvider>
         </DataProvider>
       </AuthProvider>
     </ThemeProvider>

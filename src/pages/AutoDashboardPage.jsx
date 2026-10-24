@@ -1,28 +1,45 @@
 /**
- * AutoDashboardPage — Phase 4 & 5: Zero-Click Auto-Visualization
+ * AutoDashboardPage — Phase 4 & 5: Zero-Click Auto-Visualization & 10 Advanced Features
  * 
- * Flow:
- *  1. Receives clean data from DataContext (post EDA or post upload)
- *  2. Calls /api/auto-dashboard → gets standardized dashboard config
- *  3. Shows animated loading sequence ("Cleaning… Profiling… Discovering…")
- *  4. Reveals fully-populated dashboard (KPI cards + auto-charts)
- *  5. "Edit Mode" toggles react-grid-layout for drag/resize/delete
+ * Features integrated:
+ *  1. Natural Language Querying (Chat-to-Chart)
+ *  2. Automated Anomaly Detection
+ *  3. Calculated Field Builder
+ *  4. Cross-Filtering (FilterContext + Filter Bar)
+ *  5. Data Transformation Lineage
+ *  6. One-Click Presentation Export (PDF / PNG)
+ *  7. Automated Text Insights (NLGInsight on each chart)
+ *  8. Collaborative Annotations
+ *  9. SQL & Python Code Export
+ * 10. Threshold Alerts Manager
  */
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useData } from '../context/DataContext';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
+import { useFilters } from '../context/FilterContext';
 import GridLayout from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
 
 import DynamicChart from '../components/DynamicChart';
+import ChatToChart from '../components/ChatToChart';
+import AnomalyDetector from '../components/AnomalyDetector';
+import CalcFieldBuilder from '../components/CalcFieldBuilder';
+import TransformLineage from '../components/TransformLineage';
+import ExportPanel from '../components/ExportPanel';
+import CodeViewer from '../components/CodeViewer';
+import AlertsManager from '../components/AlertsManager';
+import AnnotationPanel from '../components/AnnotationPanel';
+
 import {
   BarChart3, Sparkles, Settings2, Trash2, Plus, ArrowLeft,
   Sun, Moon, LogOut, TrendingUp, Activity, Database, RefreshCw,
-  GripVertical, X, CheckCircle2, Zap, Brain,
+  GripVertical, X, CheckCircle2, Zap, Brain, MessageSquare,
+  AlertTriangle, Calculator, GitBranch, Download, Bell, Code2,
+  Filter, Presentation, ChevronRight, Layers,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
 
 // ── Loading step sequence ─────────────────────────────────────
 const LOADING_STEPS = [
@@ -137,7 +154,7 @@ function KpiCard({ kpi, index }) {
 }
 
 // ── Chart Tile (wrapper for grid) ───────────────────────────
-function ChartTile({ config, editMode, onDelete, style }) {
+function ChartTile({ config, editMode, onDelete, onViewCode, onAnnotate, style }) {
   return (
     <div
       className="glass-card"
@@ -177,7 +194,12 @@ function ChartTile({ config, editMode, onDelete, style }) {
           </div>
         </div>
       )}
-      <DynamicChart config={config} height={230} />
+      <DynamicChart
+        config={config}
+        height={230}
+        onViewCode={onViewCode}
+        onAnnotate={onAnnotate}
+      />
     </div>
   );
 }
@@ -198,6 +220,12 @@ export default function AutoDashboardPage() {
     editModeActive, setEditModeActive,
   } = useData();
 
+  const filterContext = useFilters();
+  const filters = filterContext?.filters || {};
+  const clearFilter = filterContext?.clearFilter;
+  const clearAllFilters = filterContext?.clearAllFilters;
+  const activeFilterCount = filterContext?.activeFilterCount || 0;
+
   const [showLoading, setShowLoading] = useState(false);
   const [charts, setCharts] = useState([]);
   const [kpiCards, setKpiCards] = useState([]);
@@ -207,6 +235,12 @@ export default function AutoDashboardPage() {
   const [containerWidth, setContainerWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth - 48 : 1200
   );
+
+  // Advanced features modals state
+  const [activeModal, setActiveModal] = useState(null); // 'chat' | 'anomaly' | 'calc' | 'lineage' | 'export' | 'alerts'
+  const [codeViewerChart, setCodeViewerChart] = useState(null);
+  const [annotationState, setAnnotationState] = useState(null);
+  const dashboardRef = useRef(null);
 
   // Track container width for responsive grid
   useEffect(() => {
@@ -293,6 +327,15 @@ export default function AutoDashboardPage() {
     { label: 'History',    path: '/history' },
   ];
 
+  const toolbarButtons = [
+    { id: 'chat', label: 'Ask AI (Chat)', icon: <MessageSquare size={13} />, color: '#7c3aed', badge: 'LLM' },
+    { id: 'anomaly', label: 'Anomaly Scan', icon: <Activity size={13} />, color: '#ef4444' },
+    { id: 'calc', label: 'Calculated Field', icon: <Calculator size={13} />, color: '#10b981' },
+    { id: 'lineage', label: 'Data Lineage', icon: <GitBranch size={13} />, color: '#3b82f6' },
+    { id: 'alerts', label: 'Threshold Alerts', icon: <Bell size={13} />, color: '#f59e0b' },
+    { id: 'export', label: 'Export Deck', icon: <Download size={13} />, color: '#8b5cf6' },
+  ];
+
   // ─────────────────────────────────────────────────────────
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
@@ -340,7 +383,7 @@ export default function AutoDashboardPage() {
         </div>
       </nav>
 
-      <div style={{ padding: '32px 24px', maxWidth: 1400, margin: '0 auto' }}>
+      <div style={{ padding: '28px 24px', maxWidth: 1400, margin: '0 auto' }}>
         {/* ── Loading Phase ── */}
         {autoDashboardStatus === 'loading' && showLoading && (
           <LoadingSequence onDone={handleLoadingDone} />
@@ -367,7 +410,10 @@ export default function AutoDashboardPage() {
         {autoDashboardStatus === 'done' && !showLoading && (
           <>
             {/* Header row */}
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 28 }}>
+            <div style={{
+              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+              marginBottom: 20, flexWrap: 'wrap', gap: 16,
+            }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
                   <Sparkles size={22} color="#7c3aed" />
@@ -389,12 +435,13 @@ export default function AutoDashboardPage() {
                   {metaInfo?.cleaning_steps?.length > 0 && ` · ${metaInfo.cleaning_steps.length} auto-clean step(s)`}
                 </p>
               </div>
-              <div style={{ display: 'flex', gap: 10 }}>
+
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                 <button onClick={handleRefresh} style={{
                   background: 'var(--surface-alt)', border: '1px solid var(--border)',
-                  borderRadius: 10, padding: '8px 16px', cursor: 'pointer',
-                  color: 'var(--text-muted)', fontSize: '0.85rem',
-                  display: 'flex', alignItems: 'center', gap: 8,
+                  borderRadius: 10, padding: '8px 14px', cursor: 'pointer',
+                  color: 'var(--text-muted)', fontSize: '0.82rem',
+                  display: 'flex', alignItems: 'center', gap: 6,
                 }}>
                   <RefreshCw size={14} /> Regenerate
                 </button>
@@ -403,10 +450,10 @@ export default function AutoDashboardPage() {
                   style={{
                     background: editModeActive ? 'rgba(124,58,237,0.15)' : 'var(--surface-alt)',
                     border: `1px solid ${editModeActive ? '#7c3aed' : 'var(--border)'}`,
-                    borderRadius: 10, padding: '8px 16px', cursor: 'pointer',
+                    borderRadius: 10, padding: '8px 14px', cursor: 'pointer',
                     color: editModeActive ? '#7c3aed' : 'var(--text-muted)',
-                    fontSize: '0.85rem', fontWeight: editModeActive ? 700 : 400,
-                    display: 'flex', alignItems: 'center', gap: 8,
+                    fontSize: '0.82rem', fontWeight: editModeActive ? 700 : 500,
+                    display: 'flex', alignItems: 'center', gap: 6,
                     transition: 'all 0.2s',
                   }}
                 >
@@ -414,13 +461,118 @@ export default function AutoDashboardPage() {
                   {editModeActive ? 'Done Editing' : 'Edit Layout'}
                 </button>
                 <button onClick={() => navigate('/customize')} className="btn-primary" style={{
-                  borderRadius: 10, padding: '8px 16px', fontSize: '0.85rem',
-                  display: 'flex', alignItems: 'center', gap: 8,
+                  borderRadius: 10, padding: '8px 16px', fontSize: '0.82rem',
+                  display: 'flex', alignItems: 'center', gap: 6,
                 }}>
                   <Plus size={14} /> Add Chart
                 </button>
               </div>
             </div>
+
+            {/* ── Advanced Features Toolbar ── */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 14px', background: 'var(--surface)',
+              border: '1px solid var(--border)', borderRadius: 12,
+              marginBottom: 20, overflowX: 'auto',
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 700,
+                textTransform: 'uppercase', letterSpacing: '0.06em',
+                marginRight: 6, paddingRight: 10, borderRight: '1px solid var(--border)',
+                whiteSpace: 'nowrap',
+              }}>
+                <Zap size={14} color="#7c3aed" /> Features
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'nowrap' }}>
+                {toolbarButtons.map(btn => (
+                  <button
+                    key={btn.id}
+                    onClick={() => setActiveModal(btn.id)}
+                    style={{
+                      background: 'var(--surface-alt)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 8, padding: '6px 12px',
+                      cursor: 'pointer', color: 'var(--text)',
+                      fontSize: '0.8rem', fontWeight: 600,
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      whiteSpace: 'nowrap', transition: 'all 0.15s',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.borderColor = btn.color;
+                      e.currentTarget.style.background = `${btn.color}15`;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.borderColor = 'var(--border)';
+                      e.currentTarget.style.background = 'var(--surface-alt)';
+                    }}
+                  >
+                    <span style={{ color: btn.color }}>{btn.icon}</span>
+                    <span>{btn.label}</span>
+                    {btn.badge && (
+                      <span style={{
+                        background: btn.color, color: '#fff', fontSize: '0.62rem',
+                        fontWeight: 700, padding: '1px 5px', borderRadius: 6,
+                      }}>
+                        {btn.badge}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Active Cross-Filters Banner (Feature 4) ── */}
+            {activeFilterCount > 0 && (
+              <div style={{
+                background: 'rgba(124,58,237,0.08)',
+                border: '1px solid rgba(124,58,237,0.25)',
+                borderRadius: 12, padding: '10px 16px',
+                marginBottom: 20, display: 'flex', alignItems: 'center',
+                justifyContent: 'space-between', flexWrap: 'wrap', gap: 10,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <Filter size={15} color="#7c3aed" />
+                  <span style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--text)' }}>
+                    Active Cross-Filters ({activeFilterCount}):
+                  </span>
+                  {Object.entries(filters).map(([col, val]) => (
+                    <span
+                      key={col}
+                      style={{
+                        background: 'var(--surface)', border: '1px solid rgba(124,58,237,0.3)',
+                        borderRadius: 16, padding: '3px 10px', fontSize: '0.75rem',
+                        display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text)',
+                      }}
+                    >
+                      <strong style={{ color: '#7c3aed' }}>{col}:</strong> {String(val)}
+                      <button
+                        onClick={() => clearFilter && clearFilter(col)}
+                        style={{
+                          background: 'none', border: 'none', cursor: 'pointer',
+                          color: 'var(--text-muted)', padding: 0, display: 'flex',
+                        }}
+                        title="Remove filter"
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <button
+                  onClick={clearAllFilters}
+                  style={{
+                    background: 'none', border: '1px solid var(--border)',
+                    borderRadius: 8, padding: '4px 10px', fontSize: '0.75rem',
+                    cursor: 'pointer', color: 'var(--text-muted)',
+                  }}
+                >
+                  Clear All Filters
+                </button>
+              </div>
+            )}
 
             {/* Edit mode banner */}
             {editModeActive && (
@@ -435,78 +587,85 @@ export default function AutoDashboardPage() {
               </div>
             )}
 
-            {/* ── KPI Strip ── */}
-            {kpiCards.length > 0 && (
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: `repeat(${Math.min(kpiCards.length, 4)}, 1fr)`,
-                gap: 16, marginBottom: 28,
-              }}>
-                {kpiCards.map((kpi, i) => (
-                  <KpiCard key={kpi.id} kpi={kpi} index={i} />
-                ))}
-              </div>
-            )}
+            {/* ── Capturable Dashboard Area (for Feature 6 Presentation Export) ── */}
+            <div ref={dashboardRef} data-dashboard style={{ padding: '4px 0' }}>
+              {/* ── KPI Strip ── */}
+              {kpiCards.length > 0 && (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: `repeat(${Math.min(kpiCards.length, 4)}, 1fr)`,
+                  gap: 16, marginBottom: 24,
+                }}>
+                  {kpiCards.map((kpi, i) => (
+                    <KpiCard key={kpi.id} kpi={kpi} index={i} />
+                  ))}
+                </div>
+              )}
 
-            {/* ── Chart Grid ── */}
-            {charts.length === 0 ? (
-              <div className="glass-card" style={{
-                padding: 48, textAlign: 'center', color: 'var(--text-muted)',
-              }}>
-                <BarChart3 size={48} style={{ opacity: 0.3, marginBottom: 16 }} />
-                <p>No charts were generated. Your dataset may have too few numeric or categorical columns.</p>
-                <button onClick={() => navigate('/customize')} className="btn-primary" style={{ marginTop: 16 }}>
-                  Build Charts Manually
-                </button>
-              </div>
-            ) : editModeActive ? (
-              /* ── Draggable / Resizable Edit Mode ── */
-              <GridLayout
-                className="layout"
-                layout={layout}
-                cols={COLS}
-                rowHeight={72}
-                width={containerWidth}
-                onLayoutChange={setLayout}
-                draggableHandle=".drag-handle"
-                resizeHandles={['se']}
-                margin={[16, 16]}
-              >
-                {charts.map(cfg => (
-                  <div key={cfg.id}>
-                    <ChartTile
-                      config={cfg}
-                      editMode
-                      onDelete={handleDeleteChart}
-                      style={{ height: '100%' }}
-                    />
-                  </div>
-                ))}
-              </GridLayout>
-            ) : (
-              /* ── Static Masonry-Style Grid ── */
-              <div style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))',
-                gap: 20,
-              }}>
-                {charts.map((cfg, i) => (
-                  <div
-                    key={cfg.id}
-                    style={{
-                      gridColumn: cfg.type === 'line' || cfg.type === 'area' ? 'span 2' : 'span 1',
-                      animation: `fadeSlideUp 0.5s ease ${0.05 * i}s both`,
-                    }}
-                  >
-                    <ChartTile
-                      config={cfg}
-                      editMode={false}
-                      onDelete={handleDeleteChart}
-                    />
-                  </div>
-                ))}
-              </div>
-            )}
+              {/* ── Chart Grid ── */}
+              {charts.length === 0 ? (
+                <div className="glass-card" style={{
+                  padding: 48, textAlign: 'center', color: 'var(--text-muted)',
+                }}>
+                  <BarChart3 size={48} style={{ opacity: 0.3, marginBottom: 16 }} />
+                  <p>No charts were generated. Your dataset may have too few numeric or categorical columns.</p>
+                  <button onClick={() => navigate('/customize')} className="btn-primary" style={{ marginTop: 16 }}>
+                    Build Charts Manually
+                  </button>
+                </div>
+              ) : editModeActive ? (
+                /* ── Draggable / Resizable Edit Mode ── */
+                <GridLayout
+                  className="layout"
+                  layout={layout}
+                  cols={COLS}
+                  rowHeight={72}
+                  width={containerWidth}
+                  onLayoutChange={setLayout}
+                  draggableHandle=".drag-handle"
+                  resizeHandles={['se']}
+                  margin={[16, 16]}
+                >
+                  {charts.map(cfg => (
+                    <div key={cfg.id}>
+                      <ChartTile
+                        config={cfg}
+                        editMode
+                        onDelete={handleDeleteChart}
+                        onViewCode={(c) => setCodeViewerChart(c)}
+                        onAnnotate={(a) => setAnnotationState(a)}
+                        style={{ height: '100%' }}
+                      />
+                    </div>
+                  ))}
+                </GridLayout>
+              ) : (
+                /* ── Static Masonry-Style Grid ── */
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(420px, 1fr))',
+                  gap: 20,
+                }}>
+                  {charts.map((cfg, i) => (
+                    <div
+                      key={cfg.id}
+                      style={{
+                        gridColumn: cfg.type === 'line' || cfg.type === 'area' ? 'span 2' : 'span 1',
+                        animation: `fadeSlideUp 0.5s ease ${0.05 * i}s both`,
+                      }}
+                    >
+                      <ChartTile
+                        config={cfg}
+                        editMode={false}
+                        onDelete={handleDeleteChart}
+                        onViewCode={(c) => setCodeViewerChart(c)}
+                        onAnnotate={(a) => setAnnotationState(a)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* ── Cleaning steps footer ── */}
             {metaInfo?.cleaning_steps?.length > 0 && (
@@ -526,6 +685,55 @@ export default function AutoDashboardPage() {
           </>
         )}
       </div>
+
+      {/* ── Feature Modals ── */}
+      {activeModal === 'chat' && (
+        <ChatToChart onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'anomaly' && (
+        <AnomalyDetector onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'calc' && (
+        <CalcFieldBuilder
+          onClose={() => {
+            setActiveModal(null);
+            handleRefresh();
+          }}
+        />
+      )}
+      {activeModal === 'lineage' && (
+        <TransformLineage
+          onClose={() => {
+            setActiveModal(null);
+            handleRefresh();
+          }}
+        />
+      )}
+      {activeModal === 'alerts' && (
+        <AlertsManager onClose={() => setActiveModal(null)} />
+      )}
+      {activeModal === 'export' && (
+        <ExportPanel
+          dashboardRef={dashboardRef}
+          onClose={() => setActiveModal(null)}
+        />
+      )}
+      {codeViewerChart && (
+        <CodeViewer
+          chartConfig={codeViewerChart}
+          tableName={tableName || 'dataset'}
+          onClose={() => setCodeViewerChart(null)}
+        />
+      )}
+      {annotationState && (
+        <AnnotationPanel
+          chartId={annotationState.chartId}
+          xValue={annotationState.xValue}
+          yValue={annotationState.yValue}
+          dashboardId={tableName || 'auto-dashboard'}
+          onClose={() => setAnnotationState(null)}
+        />
+      )}
 
       {/* CSS animations */}
       <style>{`
