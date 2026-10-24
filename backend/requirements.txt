@@ -1,0 +1,12 @@
+flask
+flask-cors
+pymysql
+pandas
+numpy
+sqlalchemy
+google-generativeai
+python-docx
+python-dotenv
+openpyxl
+xlrd
+werkzeug
